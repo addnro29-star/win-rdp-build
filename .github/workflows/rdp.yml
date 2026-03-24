@@ -1,0 +1,39 @@
+name: Free Windows RDP for Build
+
+on:
+  workflow_dispatch:  # Chạy thủ công
+
+jobs:
+  rdp:
+    runs-on: windows-latest   # Windows Server 2025 (Win11-like)
+    timeout-minutes: 360      # Tối đa 6 giờ
+
+    steps:
+      - name: Enable RDP & Setup
+        shell: powershell
+        run: |
+          # Bật Remote Desktop
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
+
+          # Đặt password cho user mặc định (runneradmin)
+          $password = ConvertTo-SecureString "HanBuild2026" -AsPlainText -Force
+          Set-LocalUser -Name "runneradmin" -Password $password
+
+          Write-Host "=== RDP đã bật ==="
+          Write-Host "Username: runneradmin"
+          Write-Host "Password: HanBuild2026  (bạn có thể đổi sau)"
+
+      - name: Download & Run ngrok
+        shell: powershell
+        env:
+          NGROK_AUTH: ${{ secrets.NGROK_AUTH_TOKEN }}
+        run: |
+          Invoke-WebRequest -Uri "https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-windows-amd64.zip" -OutFile "ngrok.zip"
+          Expand-Archive "ngrok.zip" -DestinationPath "ngrok"
+          cd ngrok
+          .\ngrok.exe authtoken $env:NGROK_AUTH
+          Start-Process -FilePath ".\ngrok.exe" -ArgumentList "tcp 3389" -NoNewWindow -PassThru
+          Write-Host "=== Đang tạo tunnel ngrok... ==="
+          Write-Host "Chờ 30 giây và xem log bên dưới để lấy link RDP"
