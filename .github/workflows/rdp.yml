@@ -1,72 +1,81 @@
-name: Free Windows RDP for Build (Win11-like)
+name: Debug Windows CI via Tailscale RDP
+on: 
+  workflow_dispatch:
 
-on:
-  workflow_dispatch:   # Chạy thủ công khi bạn cần
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  rdp:
-    runs-on: windows-latest          # Windows Server 2025 (gần giống Win11, tương thích build tốt)
-    timeout-minutes: 360             # Chạy tối đa 6 giờ
-
+  debug-runner:
+    runs-on: windows-latest
     steps:
-      - name: Enable RDP & Set Password
-        shell: powershell
-        run: |
-          Write-Host "=== Bật Remote Desktop ==="
-          
-          # Bật RDP
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          
-          # Đặt password cho user runneradmin
-          $password = ConvertTo-SecureString "HanBuild2026" -AsPlainText -Force
-          Set-LocalUser -Name "runneradmin" -Password $password
-          
-          Write-Host "Username: runneradmin"
-          Write-Host "Password: HanBuild2026"
-          Write-Host "RDP đã bật thành công!"
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Download & Run ngrok v3 (Fix ERR_NGROK_121)
+      - name: Fix System Environment (Disable Test Mode)
+        run: |
+          Write-Host "--- Dang thuc hien Fix Kernel Integrity ---"
+          # Tat Test Mode va Integrity Checks o cap do he thong
+          bcdedit /set testsigning off
+          bcdedit /set nointegritychecks off
+          
+          # Force ghi de vao Registry de "lua" cac ung dung kiem tra trang thai boot
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control" /v "SystemStartOptions" /t REG_SZ /d " NOINTEGRITYCHECKS" /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy" /v "VerifiedAndReputablePolicyState" /t REG_DWORD /d 0 /f
+          
+          # Reset lai trang thai Kernel Code Integrity qua Registry
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" /v "FeatureSettingsOverride" /t REG_DWORD /d 0 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" /v "FeatureSettingsOverrideMask" /t REG_DWORD /d 3 /f
+          
+          Write-Host "Fix hoan tat. Dang tiep tuc setup..."
         shell: powershell
+
+      - name: Install and Connect Tailscale manually
         env:
-          NGROK_AUTH: ${{ secrets.NGROK_AUTH_TOKEN }}
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
-          Write-Host "=== Tải ngrok phiên bản mới nhất (v3) ==="
+          Write-Host "1. Installing Tailscale..."
+          choco install tailscale -y --no-progress
           
-          # Link tải ngrok v3 ổn định hiện tại
-          Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "ngrok.zip"
+          Write-Host "2. Waiting for service..."
+          Start-Sleep -Seconds 5
           
-          Expand-Archive "ngrok.zip" -DestinationPath "ngrok" -Force
-          cd ngrok
-          
-          # Đăng nhập ngrok v3
-          .\ngrok.exe config add-authtoken $env:NGROK_AUTH
-          
-          Write-Host "Ngrok v3 đã tải và đăng nhập thành công!"
-          
-          # Chạy tunnel cho RDP (port 3389)
-          Start-Process -FilePath ".\ngrok.exe" -ArgumentList "tcp 3389 --log=stdout" -NoNewWindow -PassThru
-          
-          Write-Host "=== Đang tạo tunnel ngrok... ==="
-          Write-Host "Chờ khoảng 20-40 giây để tunnel ổn định."
-          Write-Host "Sau đó xem log bên dưới để tìm dòng chứa:"
-          Write-Host "tcp://0.tcp.ngrok.io:XXXXX   <-- Đây là địa chỉ RDP của bạn"
-          
-          # Chờ để tunnel khởi tạo và in log rõ ràng
-          Start-Sleep -Seconds 40
-
-      - name: Show Final RDP Info
+          Write-Host "3. Connecting to Tailscale..."
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=$env:TAILSCALE_AUTHKEY --unattended --reset
         shell: powershell
+
+      - name: Enable RDP and Create User
         run: |
-          Write-Host "=================================================="
-          Write-Host "                 THÔNG TIN RDP"
-          Write-Host "=================================================="
-          Write-Host "Username : runneradmin"
-          Write-Host "Password : HanBuild2026"
-          Write-Host "=================================================="
-          Write-Host "Hướng dẫn kết nối:"
-          Write-Host "1. Mở Remote Desktop (mstsc) trên máy bạn"
-          Write-Host "2. Nhập địa chỉ RDP lấy từ log bước trên (dạng 0.tcp.ngrok.io:XXXXX)"
-          Write-Host "3. Nhập username và password ở trên"
-          Write-Host "=================================================="
-          Write-Host "Máy sẽ tự tắt sau tối đa 6 giờ. Build xong thì để nó chạy hoặc Re-run sau."
+          # Cho phep ket noi RDP
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
+          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 1
+          
+          # Tao tai khoan RunnerAdmin
+          $User = 'RunnerAdmin'
+          $Password = ConvertTo-SecureString 'TempPassword123!@' -AsPlainText -Force
+          
+          if (Get-LocalUser -Name $User -ErrorAction SilentlyContinue) {
+              Set-LocalUser -Name $User -Password $Password
+          } else {
+              New-LocalUser -Name $User -Password $Password -FullName 'RunnerAdmin' -Description 'RDPUser'
+              Add-LocalGroupMember -Group 'Administrators' -Member $User
+          }
+        shell: powershell
+
+      - name: Display Connection Info
+        run: |
+          $TailscaleIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+          Write-Host "==========================================================="
+          Write-Host "VPS CUA BAN DA SAN SANG!"
+          Write-Host "IP Tailscale: $TailscaleIP"
+          Write-Host "User:         RunnerAdmin"
+          Write-Host "Pass:         TempPassword123!@"
+          Write-Host "==========================================================="
+        shell: powershell
+
+      - name: Keep Runner Alive
+        run: |
+          Write-Host "Dang giu VPS song trong 6 tieng..."
+          Start-Sleep -Seconds 21600
+        shell: powershell
